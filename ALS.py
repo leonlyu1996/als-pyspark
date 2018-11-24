@@ -7,14 +7,19 @@ from pyspark import SparkContext
 from pyspark.accumulators import AccumulatorParam
 from .util.partitioner import HashPartitioner, Partitioner
 from .util.encoder import LocalIndexEncoder
-from scipy.linalg import blas
-
+from scipy.linalg import blas, cholesky
+from scipy.optimize import nnls
+from numpy.linalg.linalg import LinAlgError
 sc = SparkContext()
 
 
-#########
-# Inner class Rating
-#########
+class Rating:
+
+    def __init__(self, user, item, rating):
+        self.user = user
+        self.item = item
+        self.rating = rating
+
 
 class RatingBlock:
     def __init__(self, src_ids, dst_ids, ratings):
@@ -43,7 +48,7 @@ class RatingBlockBuilder:
 
         self.size += 1
         self.__src_ids += r.user
-        self.__dst_ids += r.product
+        self.__dst_ids += r.item
         self.__ratings += r.rating
 
     def merge(self, other):
@@ -188,10 +193,7 @@ class AccumulateRatingBlockBuilder(AccumulatorParam):
         return value1
 
 
-class LeastSquaresNESolver:
 
-    def __init__(self):
-        pass
 
 
 class NormalEquation:
@@ -213,7 +215,7 @@ class NormalEquation:
         self.copy2double(a)
 
         # use ata as return?
-        self.ata = blas.dspr(self.k, c, self.da, self.ata)
+        self.ata = blas.dspr(self.k, c, self.da, self.ata, lower=1)
         if b != 0:
             self.atb = blas.daxpy(self.da, self.atb, n=self.k, a=b)
 
@@ -235,6 +237,92 @@ class NormalEquation:
         self.atb.fill(0.0)
 
 
+class LeastSquaresNESolver:
+
+    def __init__(self):
+        pass
+
+    def solve(self, ne, lamd):
+        pass
+
+
+class NNLSSolver(LeastSquaresNESolver):
+
+    def __init__(self):
+        LeastSquaresNESolver.__init__(self)
+        self.__rank = -1
+        self.__ata = None
+        self.__initialized = False
+
+    def initialize(self, rank):
+        if not self.__initialized:
+            self.__rank = rank
+            self.__ata = np.zeros(rank * rank)
+            self.__initialized = True
+
+        else:
+            assert self.__rank == rank
+
+    def solve(self, ne, lamd):
+        rank = ne.k
+        self.initialize(rank)
+        self.fill_ata(ne.ata, lamd)
+        x = nnls(self.__ata, ne.atb)
+        ne.reset()
+        return x
+
+    def fill_ata(self, tri_ata, lamd):
+
+        pos = 0
+        for i in range(self.__rank):
+
+            for j in range(i + 1):
+
+                a = tri_ata[pos]
+                self.__ata[i * self.__rank + j] = a
+                self.__ata[j * self.__rank + i] = a
+                pos += 1
+
+            self.__ata[i * self.__rank + i] += lamd
+
+
+class CholeskySolver(LeastSquaresNESolver):
+
+    def __init__(self):
+        LeastSquaresNESolver.__init__(self)
+        self.__ata = None
+
+    def solve(self, ne, lamd):
+        k = ne.k
+        j = 2
+        for i in range(ne.tri_k):
+            ne.ata[i] += lamd
+            i += j
+            j += 1
+
+        self.fill_ata(ne.ata, lamd, k)
+        try:
+            inverse_ata = cholesky(self.__ata)
+        except LinAlgError:
+            print "2-th leading minor of the array may be not positive definite"
+            exit(1)
+
+        x = np.dot(inverse_ata, ne.atb.T)
+        ne.reset()
+        return x
+
+    def fill_ata(self, tri_ata, lamd, rank):
+        pos = 0
+        for i in range(rank):
+
+            for j in range(i + 1):
+                a = tri_ata[pos]
+                self.__ata[i * rank + j] = a
+                self.__ata[j * rank + i] = a
+                pos += 1
+
+            self.__ata[i * rank + i] += lamd
+
 
 class NewALS:
 
@@ -246,23 +334,34 @@ class NewALS:
 
     def train(self,
               ratings,
-              rank,
-              num_user_blocks,
-              num_item_blocks,
-              max_iter,
-              reg_param,
-              implicit_prefs,
-              alpha,
-              nonnegative,
-              intermediate_rdd_storage_level,
-              final_rdd_storage_level,
-              check_point_interval,
-              seed):
+              rank=10,
+              num_user_blocks=10,
+              num_item_blocks=10,
+              max_iter=10,
+              reg_param=0.1,
+              implicit_prefs=False,
+              alpha=1.0,
+              nonnegative=False,
+              intermediate_rdd_storage_level=StorageLevel.MEMORY_AND_DISK,
+              final_rdd_storage_level=StorageLevel.MEMORY_AND_DISK,
+              check_point_interval=10,
+              seed=0):
 
         assert isinstance(ratings, RDD)
         assert not ratings.isEmpty(), "ratings RDD is empty!"
         assert intermediate_rdd_storage_level is not None, \
             "ALS is not designed to run without persisting intermediate RDDs."
+
+        def zip_id_and_factor(items):
+            """
+
+            :param items: (_, (ids, factors))
+            :return:
+            """
+
+            ids = items[1][0]
+            factors = items[1][1]
+            return zip(ids, factors)
 
         sc = ratings.context()
 
@@ -301,10 +400,85 @@ class NewALS:
         user_factors = self.initialize(user_in_blocks, rank)
         item_factors = self.initialize(item_in_blocks, rank)
 
+        # check point file?
 
+        solver = NNLSSolver if nonnegative else CholeskySolver
 
+        if implicit_prefs:
+            for iter in range(1, max_iter + 1):
 
+                user_factors.persist(intermediate_rdd_storage_level)
+                previous_item_factors = item_factors
+                item_factors = self.compute_factors(src_factor_blocks=user_factors,
+                                                    src_out_blocks=user_out_blocks,
+                                                    dst_in_blocks=item_in_blocks,
+                                                    rank=rank,
+                                                    reg_param=reg_param,
+                                                    src_encoder=user_local_index_encoder,
+                                                    implicit_prefs=implicit_prefs,
+                                                    alpha=alpha,
+                                                    solver=solver)
+                previous_item_factors.unpersist()
+                item_factors.persist(intermediate_rdd_storage_level)
 
+                previous_user_factors = user_factors
+                user_factors = self.compute_factors(src_factor_blocks=item_factors,
+                                                    src_out_blocks=item_out_blocks,
+                                                    dst_in_blocks=user_in_blocks,
+                                                    rank=rank,
+                                                    reg_param=reg_param,
+                                                    src_encoder=item_local_index_encoder,
+                                                    implicit_prefs=implicit_prefs,
+                                                    alpha=alpha,
+                                                    solver=solver)
+
+                previous_user_factors.unpersist()
+
+        else:
+
+            for iter in range(0, max_iter):
+
+                item_factors = self.compute_factors(src_factor_blocks=user_factors,
+                                                    src_out_blocks=user_out_blocks,
+                                                    dst_in_blocks=item_in_blocks,
+                                                    rank=rank,
+                                                    reg_param=reg_param,
+                                                    src_encoder=user_local_index_encoder,
+                                                    solver=solver)
+
+                user_factors = self.compute_factors(src_factor_blocks=item_factors,
+                                                    src_out_blocks=item_out_blocks,
+                                                    dst_in_blocks=user_in_blocks,
+                                                    rank=rank,
+                                                    reg_param=reg_param,
+                                                    src_encoder=item_local_index_encoder,
+                                                    solver=solver)
+
+        user_id_and_factors = \
+            user_in_blocks.mapValues(lambda in_block: in_block.src_ids)\
+                          .join(user_factors)\
+                          .mapPartitions(lambda items: items.flatMap(zip_id_and_factor),
+                                         preservesPartitioning=True)\
+                          .persist(final_rdd_storage_level)
+
+        item_id_and_factors = \
+            item_in_blocks.mapValues(lambda in_blocks: in_blocks.src_ids)\
+                          .join(item_factors)\
+                          .mapPartitions(lambda items: items.flatMap(zip_id_and_factor),
+                                         preservesPartitioning=True)\
+                          .persist(final_rdd_storage_level)
+
+        if final_rdd_storage_level != StorageLevel.None:
+            user_id_and_factors.count()
+            item_factors.unpersist()
+            item_id_and_factors.count()
+            user_in_blocks.unpersist()
+            user_out_blocks.unpersist()
+            item_in_blocks.unpersist()
+            item_out_blocks.unpersist()
+            block_ratings.unpersist()
+
+        return user_id_and_factors, item_id_and_factors
 
     def partition_ratings(self,
                           rating,
@@ -325,7 +499,7 @@ class NewALS:
 
             for r in iterator:
                 src_block_id = src_part.get_partition(r.user)
-                dst_block_id = dst_part.get_partition(r.product)
+                dst_block_id = dst_part.get_partition(r.item)
                 idx = src_block_id + src_part.num_partitions * dst_block_id
                 builder = rating_bolck_builders[idx]
                 # different user and product id can be hashed to same builder
@@ -493,7 +667,7 @@ class NewALS:
                         rank,
                         reg_param,
                         src_encoder,
-                        implicit_prefs,
+                        implicit_prefs=False,
                         alpha=1.0,
                         solver=LeastSquaresNESolver):
 
@@ -516,7 +690,10 @@ class NewALS:
                                 .map(lambda (active_incides, dst_block_id):
                                     (dst_block_id, (src_block_id, active_incides.map(lambda idx: src_factors[idx]))))
 
-        def compute_dst_factors(in_block_with_factors, num_src_blocks, src_encoder):
+        def compute_dst_factors(in_block_with_factors,
+                                num_src_blocks,
+                                src_encoder,
+                                solver):
             """
 
             :param in_block_with_factors: (InBlock(dstIds, srcPtrs, srcEncodedIndices, ratings), srcFactors)
@@ -540,10 +717,13 @@ class NewALS:
 
                 num_explicits = 0
                 for i in range(in_block.dst_ptrs[j], in_block.dst_ptrs[j + 1]):
+
                     encoded = in_block.dst_encoded_incides[i]
+
                     block_id = src_encoder.blockId(encoded)
                     local_index = src_encoder.get_local_index(encoded)
                     src_factor = sorted_src_factors[block_id][local_index]
+
                     rating = in_block.ratings[i]
 
                     if implicit_prefs:
@@ -575,13 +755,12 @@ class NewALS:
 
         merged = src_out.groupByKey(partitioner)
 
-        return dst_in_blocks.join(merged)\
-                            .mapValues(lambda in_block_with_factors:
-                                       compute_dst_factors(in_block_with_factors, num_src_blocks, src_encoder))
+        dst_factors =  \
+            dst_in_blocks.join(merged)\
+                         .mapValues(lambda in_block_with_factors:
+                                    compute_dst_factors(in_block_with_factors, num_src_blocks, src_encoder, solver))
 
-
-
-
+        return dst_factors
 
     def compute_y_t_y(self, factor_blocks, rank):
 
