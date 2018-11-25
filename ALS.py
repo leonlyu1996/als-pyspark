@@ -11,6 +11,7 @@ from util.encoder import LocalIndexEncoder
 from scipy.linalg import blas, cholesky
 from scipy.optimize import nnls
 from numpy.linalg.linalg import LinAlgError
+import pdb
 
 
 sc = SparkContext()
@@ -84,33 +85,44 @@ class RatingBlockBuilder:
         self.__ratings += other.ratings
 
     def build(self):
+        print "builder.build src_ids {}, dst_ids {}, ratings {}"\
+            .format(self.__src_ids, self.__dst_ids, self.__ratings)
         return RatingBlock(self.__src_ids,
                            self.__dst_ids,
                            self.__ratings)
 
 
-class InBlock:
+class InBlock(namedtuple("InBlock", ["src_ids", "dst_ptrs", "dst_encoded_incides", "ratings", "size"])):
 
-    def __init__(self,
-                 src_ids,
-                 dst_ptrs,
-                 dst_encoded_incides,
-                 ratings):
-        """
+    # def __init__(self,
+    #              src_ids,
+    #              dst_ptrs,
+    #              dst_encoded_incides,
+    #              ratings):
+    #     """
+    #
+    #     :param src_ids:                 (list)
+    #     :param dst_ptrs:                (list)
+    #     :param dst_encoded_incides:     (list)
+    #     :param ratings:                 (list)
+    #     """
+    #     self.src_ids = src_ids
+    #     self.dst_ptrs = dst_ptrs
+    #     self.dst_encoded_incides = dst_encoded_incides
+    #     self.ratings = ratings
+    #     self.size = len(ratings)
+    #     print "dst_encoded_incides: {}, self.size: {}, dst_ptrs: {}".format(len(dst_encoded_incides), self.size, len(dst_ptrs))
+    #     assert len(dst_encoded_incides) == self.size
+    #     assert len(dst_ptrs) == len(src_ids) + 1
 
-        :param src_ids:                 (list)
-        :param dst_ptrs:                (list)
-        :param dst_encoded_incides:     (list)
-        :param ratings:                 (list)
-        """
-        self.src_ids = src_ids
-        self.dst_ptrs = dst_ptrs
-        self.dst_encoded_incides = dst_encoded_incides
-        self.ratings = ratings
-        self.size = len(src_ids)
-        assert len(dst_ptrs) == self.size
-        assert len(dst_ptrs) == self.size + 1
+    def __reduce__(self):
+        self.size = len(self.ratings)
+        print "dst_encoded_incides: {}, self.size: {}, dst_ptrs: {}".format(len(self.dst_encoded_incides), self.size, len(self.dst_ptrs))
+        assert len(self.dst_encoded_incides) == self.size
+        assert len(self.dst_ptrs) == len(self.src_ids) + 1
+        return InBlock, (self.src_ids, self.dst_ptrs, self.dst_encoded_incides, self.ratings)
 
+        # (namedtuple("InBlock", ["src_ids", "dst_ptrs", "dst_encoded_incides", "ratings"]))
 
 class UncompressedInBlock:
 
@@ -139,10 +151,14 @@ class UncompressedInBlock:
         pre_src_id = self._src_ids[0]
         unique_src_ids.append(pre_src_id)
 
+        print "__src_ids: {}".format(self._src_ids)
         curr_count = 1
         for i in range(1, self.size):
             src_id = self._src_ids[i]
+            print "src_id: {}".format(src_id)
+            print "pre_src_id: {}".format(pre_src_id)
             if src_id != pre_src_id:
+                print "curr_count: {}".format(curr_count)
                 unique_src_ids.append(src_id)
                 dst_counts.append(curr_count)
                 pre_src_id = src_id
@@ -152,20 +168,23 @@ class UncompressedInBlock:
 
         dst_counts.append(curr_count)
 
-        print "unique_src_ids: {}, dst_counts: {}".format(unique_src_ids, dst_counts)
         num_unique = len(unique_src_ids)
-        dst_ptrs = np.zeros(num_unique + 1)
+        dst_ptrs = np.zeros(num_unique + 1, dtype=int)
         sum_count = 0
         i = 0
+        print "unique_src_ids {}".format(unique_src_ids)
         while i < num_unique:
-            sum_count += unique_src_ids[i]
+            sum_count += dst_counts[i]
             i += 1
-            dst_ptrs[i] = sum_count
+            dst_ptrs[i] = int(sum_count)
 
+        print "unique_src_ids: {}, dst_counts: {}, dst_ptrs: {}".format(unique_src_ids, dst_counts, dst_ptrs)
+        # pdb.set_trace()
         return InBlock(unique_src_ids,
                        dst_ptrs,
                        self._dst_encoded_incides,
-                       self._ratings)
+                       self._ratings,
+                       len(self._ratings))
 
 
 class UncompressedInBlockBuilder:
@@ -206,7 +225,7 @@ class UncompressedInBlockBuilder:
 class AccumulateRatingBlockBuilder(AccumulatorParam):
 
     def zero(self, value):
-        return [RatingBlockBuilder()] * value
+        return [RatingBlockBuilder() for _ in range(value)]
 
     def addInPlace(self, value1, value2):
         """
@@ -394,13 +413,13 @@ class NewALS:
         block_ratings = self.partition_ratings(ratings, user_part, item_part)\
                             .persist(intermediate_rdd_storage_level)
 
+        print "block_rating: {}".format(block_ratings.glom().collect())
         (user_in_blocks, user_out_blocks) = \
             self.make_blocks(block_ratings,
                              user_part,
                              item_part,
                              intermediate_rdd_storage_level)
 
-        print user_out_blocks.collect()
         user_out_blocks.count()
 
         swapped_block_ratings = \
@@ -485,6 +504,7 @@ class NewALS:
                                          preservesPartitioning=True)\
                           .persist(final_rdd_storage_level)
 
+        # print "user_id_and_factors: {}".format(user_id_and_factors.collect())
         item_id_and_factors = \
             item_in_blocks.mapValues(lambda in_blocks: in_blocks.src_ids)\
                           .join(item_factors)\
@@ -492,7 +512,7 @@ class NewALS:
                                          preservesPartitioning=True)\
                           .persist(final_rdd_storage_level)
 
-        if final_rdd_storage_level != StorageLevel.None:
+        if final_rdd_storage_level != None:
             user_id_and_factors.count()
             item_factors.unpersist()
             item_id_and_factors.count()
@@ -519,7 +539,13 @@ class NewALS:
         assert isinstance(src_part, Partitioner)
         assert isinstance(dst_part, Partitioner)
 
-        def map_rating(iterator, rating_bolck_builders):
+        # print "rating_in_partition: {}".format(rating.collect())
+        # print "len_rating: {}".format(len(rating.collect()))
+
+        def map_rating(iterator, num_partitions):
+
+            rating_bolck_builders = \
+                [RatingBlockBuilder() for _ in range(num_partitions)]
 
             for r in iterator:
                 src_block_id = src_part.get_partition(r.user)
@@ -527,12 +553,16 @@ class NewALS:
                 idx = src_block_id + src_part.num_partitions * dst_block_id
                 builder = rating_bolck_builders[idx]
                 # different user and product id can be hashed to same builder
+                # print "(r.user {}, r.item {}, r.rating {})".format(r.user, r.item, r.rating)
+                # print "src_block_id {}, dst_block_id {}".format(src_block_id, dst_block_id)
                 builder.add(r)
 
                 # if builder size >= 2048, build the full builder and insert a new builder
                 if builder.size >= 2048:
                     rating_bolck_builders[idx] = RatingBlockBuilder()
                     yield ((src_block_id, dst_block_id), builder.build())
+
+            # print "rating_block_builder++++: {}".format(len(rating_bolck_builders))
 
             for idx, builder in enumerate(rating_bolck_builders):
                 if builder.size > 0:
@@ -541,12 +571,13 @@ class NewALS:
 
                     yield ((src_block_id, dst_block_id), builder.build())
 
+
         def aggregate(block):
 
             builder = RatingBlockBuilder()
+
             for blk in block:
-                print type(blk)
-                # exit(1)
+                # print "blk src_ids: {}, dst_ids: {}, ratings: {}".format(blk.src_ids, blk.dst_ids, blk.ratings)
                 builder.merge(blk)
             # block.foreach(builder.merge)
 
@@ -556,16 +587,16 @@ class NewALS:
         num_partitions = \
             src_part.num_partitions * dst_part.num_partitions
 
-        rating_bolck_builders = \
-            [RatingBlockBuilder()] * num_partitions
+        # print "num_partitions_should_be_4 : {}".format(num_partitions)
 
         # rating_bolck_builders = sc.accumulator(num_partitions, AccumulateRatingBlockBuilder())
 
         rating_bolcks = \
-            rating.mapPartitions(lambda iter: map_rating(iter, rating_bolck_builders))\
+            rating.mapPartitions(lambda iter: map_rating(iter, num_partitions))\
                   .groupByKey()\
                   .mapValues(aggregate)
 
+        # print "rating blocks : {}".format(rating_bolcks.glom().collect())
         return rating_bolcks
 
     def make_blocks(self,
@@ -592,8 +623,6 @@ class NewALS:
             for dst_id in block.dst_ids:
                 dst_id_set.add(dst_id)
 
-            print "dst_id_set: {}".format(dst_id_set)
-
             sorted_dst_ids = sorted(list(dst_id_set))
 
             # i is the dst_id position in this block
@@ -603,7 +632,7 @@ class NewALS:
             dst_local_indices = \
                 map(lambda id: dst_id_to_local_index[id], block.dst_ids)
 
-            yield (rating_block[0][0], (rating_block[0][1],
+            return (rating_block[0][0], (rating_block[0][1],
                                         block.src_ids,
                                         list(dst_local_indices),
                                         block.ratings))
@@ -624,6 +653,8 @@ class NewALS:
             # rating block in each in_block
             for rating_block in iterator:
 
+                print rating_block
+
                 builder.add(rating_block[0],
                             rating_block[1],
                             rating_block[2],
@@ -640,10 +671,12 @@ class NewALS:
 
             encoder = LocalIndexEncoder(dst_part.num_partitions)
             # list of arrays
-            active_ids = [np.zeros(0)] * dst_part.num_partitions
+            active_ids = [np.zeros(0, dtype=int) for _ in range(dst_part.num_partitions)]
             seen = np.empty(dst_part.num_partitions, dtype=bool)
 
-            for i in range(in_block.size):
+            print "in_block.src_ids {}".format(in_block.src_ids)
+
+            for i in range(len(in_block.src_ids)):
 
                 seen.fill(False)
 
@@ -651,7 +684,9 @@ class NewALS:
                     block_id = \
                         encoder.get_block_id(in_block.dst_encoded_incides[j])
 
+                    print "block_id {}".format(block_id)
                     if not seen[block_id]:
+
                         active_ids[block_id] = \
                             np.append(active_ids[block_id], [i])
 
@@ -670,13 +705,14 @@ class NewALS:
                          .mapValues(lambda value: build_in_block(value, dst_part))\
                          .persist(storage_level)
 
-        print "in_blocks: {}".format(in_blocks)
-        exit(1)
+        print "in_blocks: {}".format(in_blocks.collect())
 
         # in ALS.scala the array is used
         out_blocks = \
             in_blocks.mapValues(lambda value: build_out_block(value, dst_part))\
                      .persist(storage_level)
+
+        print "out_blocks: {}".format(out_blocks.collect())
 
         return in_blocks, out_blocks
 
@@ -694,7 +730,9 @@ class NewALS:
             :return:
             """
             # list of arrays
-            factors = [np.random.uniform(0, 1, rank)] * src_in_block[1].size
+            factors = \
+                [np.random.uniform(0, 1, rank) for _ in range(len(src_in_block[1].src_ids))]
+
             return src_in_block[0], factors
 
         return in_blocks.map(lambda x: ini_random_factor(x, rank))
@@ -718,16 +756,17 @@ class NewALS:
         def trans_src_out_blocks(joined_src_out):
             """
 
-            :param joined_src_out:  (srcBlockId, (srcOutBlock, srcFactors)
+            :param joined_src_out:  (srcBlockId, (srcOutBlock, srcFactors))
             :return:
             """
             src_out_block = joined_src_out[1][0]
             src_block_id = joined_src_out[0]
             src_factors = joined_src_out[1][1]
-            assert isinstance(src_out_block, RDD)
+            # assert isinstance(src_out_block, RDD)
 
-            yield src_out_block.zipWithIndex()\
-                               .map(lambda (active_incides, dst_block_id):
+            yield joined_src_out.map(lambda x: x[1][0])\
+                                .zipWithIndex()\
+                                .map(lambda (active_incides, dst_block_id):
                                     (dst_block_id, (src_block_id, active_incides.map(lambda idx: src_factors[idx]))))
 
         def compute_dst_factors(in_block_with_factors,
@@ -747,7 +786,7 @@ class NewALS:
             src_factors.foreach(lambda (src_block_id, factors):
                                 np.put(sorted_src_factors, [src_block_id], [factors]))
 
-            dst_factors = [np.zeros(0)] * in_block.size
+            dst_factors = [np.zeros(0) for _ in range(in_block.size)]
             ls = NormalEquation(rank)
             for j in range(in_block.size):
                 ls.reset()
@@ -786,14 +825,19 @@ class NewALS:
         y_t_y = \
             self.compute_y_t_y(src_factor_blocks, rank) if implicit_prefs else None
 
-        src_out = src_out_blocks.join(src_factor_blocks)\
-                                .flatMap(trans_src_out_blocks)
+        src_out = src_out_blocks.join(src_factor_blocks)
+
+        print "src_out: {}".format(src_out.collect())
+
+        # src_out = src_out_blocks.join(src_factor_blocks)\
+        #                         .flatMap(trans_src_out_blocks)
 
         assert isinstance(src_out, RDD)
 
         partitioner = HashPartitioner(dst_in_blocks.getNumPartitions())
 
-        merged = src_out.groupByKey(partitioner)
+        merged = src_out.groupByKey(numPartitions=partitioner.num_partitions,
+                                    partitionFunc=partitioner.get_partition)
 
         dst_factors =  \
             dst_in_blocks.join(merged)\
@@ -825,12 +869,12 @@ class NewALS:
 if __name__ == "__main__":
     # sc = SparkContext()
 
-    data = sc.textFile("data/test.data")
+    data = sc.textFile("data/test.data", 2)
     ratings = data.map(lambda l: l.split(',')) \
         .map(lambda l: Rating(int(l[0]), int(l[1]), float(l[2])))
 
     # print ratings.isEmpty()
-    print ratings.collect()
+    print ratings.glom().collect()
 
     # Build the recommendation model using Alternating Least Squares
     rank = 10
@@ -838,8 +882,10 @@ if __name__ == "__main__":
 
     als = NewALS()
 
-    num_user_blocks = max(sc.defaultParallelism, ratings.getNumPartitions() / 2)
-    num_item_blocks = max(sc.defaultParallelism, ratings.getNumPartitions() / 2)
+    num_user_blocks = max(ratings.getNumPartitions(), ratings.getNumPartitions() / 2)
+    print num_user_blocks
+
+    num_item_blocks = max(ratings.getNumPartitions(), ratings.getNumPartitions() / 2)
 
     (user_id_and_factors, item_id_and_factors) = als.train(ratings=ratings,
                                                            rank=rank,
