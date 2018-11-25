@@ -1,24 +1,43 @@
-from pyspark.mllib.recommendation import ALS, MatrixFactorizationModel, Rating
+from pyspark.mllib.recommendation import ALS, MatrixFactorizationModel
 from pyspark.rdd import RDD
 import numpy as np
+from collections import namedtuple
 from pyspark.mllib.common import callMLlibFunc
 from pyspark.storagelevel import StorageLevel
 from pyspark import SparkContext
 from pyspark.accumulators import AccumulatorParam
-from .util.partitioner import HashPartitioner, Partitioner
-from .util.encoder import LocalIndexEncoder
+from util.partitioner import HashPartitioner, Partitioner
+from util.encoder import LocalIndexEncoder
 from scipy.linalg import blas, cholesky
 from scipy.optimize import nnls
 from numpy.linalg.linalg import LinAlgError
+
+
 sc = SparkContext()
 
 
-class Rating:
+# class Rating:
+#
+#     def __init__(self, user, item, rating):
+#         self.user = user
+#         self.item = item
+#         self.rating = rating
 
-    def __init__(self, user, item, rating):
-        self.user = user
-        self.item = item
-        self.rating = rating
+class Rating(namedtuple("Rating", ["user", "item", "rating"])):
+    """
+    Represents a (user, product, rating) tuple.
+
+    >>> r = Rating(1, 2, 5.0)
+    >>> (r.user, r.product, r.rating)
+    (1, 2, 5.0)
+    >>> (r[0], r[1], r[2])
+    (1, 2, 5.0)
+
+    .. versionadded:: 1.2.0
+    """
+
+    def __reduce__(self):
+        return Rating, (int(self.user), int(self.item), float(self.rating))
 
 
 class RatingBlock:
@@ -193,9 +212,6 @@ class AccumulateRatingBlockBuilder(AccumulatorParam):
         return value1
 
 
-
-
-
 class NormalEquation:
 
     def __init__(self, k):
@@ -324,11 +340,13 @@ class CholeskySolver(LeastSquaresNESolver):
             self.__ata[i * rank + i] += lamd
 
 
+#########
+# Class NewALS
+#########
+
+
 class NewALS:
 
-    #########
-    # Class NewALS
-    #########
     def __init__(self):
         pass
 
@@ -362,8 +380,6 @@ class NewALS:
             ids = items[1][0]
             factors = items[1][1]
             return zip(ids, factors)
-
-        sc = ratings.context()
 
         user_part = HashPartitioner(num_user_blocks)
         item_part = HashPartitioner(num_item_blocks)
@@ -781,6 +797,36 @@ class NewALS:
                                        (lambda (ne1, ne2): inter_add(ne1, ne2)))
 
 
+
+if __name__ == "__main__":
+    # sc = SparkContext()
+
+    data = sc.textFile("data/test.data")
+    ratings = data.map(lambda l: l.split(',')) \
+        .map(lambda l: Rating(int(l[0]), int(l[1]), float(l[2])))
+
+    # print ratings.isEmpty()
+    print ratings.collect()
+
+    # Build the recommendation model using Alternating Least Squares
+    rank = 10
+    numIterations = 10
+
+    als = NewALS()
+
+    num_user_blocks = max(sc.defaultParallelism, ratings.getNumPartitions() / 2)
+    num_item_blocks = max(sc.defaultParallelism, ratings.getNumPartitions() / 2)
+
+    (user_id_and_factors, item_id_and_factors) = als.train(ratings=ratings,
+                                                           rank=rank,
+                                                           num_user_blocks=num_user_blocks,
+                                                           num_item_blocks=num_item_blocks,
+                                                           max_iter=numIterations,
+                                                           reg_param=0.01,
+                                                           nonnegative=False)
+
+    print user_id_and_factors
+    print item_id_and_factors
 
 
 
