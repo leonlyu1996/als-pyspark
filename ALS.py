@@ -75,8 +75,8 @@ class RatingBlockBuilder:
         self.__ratings += [r.rating]
 
     def merge(self, other):
-        assert isinstance(other, RatingBlock), \
-            "input of merge should be an instance of RatingBlock!"
+        # assert isinstance(other, RatingBlock), \
+        #     "input of merge should be an instance of RatingBlock!"
 
         self.size += len(other.src_ids)
         self.__src_ids += other.src_ids
@@ -87,6 +87,7 @@ class RatingBlockBuilder:
         return RatingBlock(self.__src_ids,
                            self.__dst_ids,
                            self.__ratings)
+
 
 class InBlock:
 
@@ -120,6 +121,7 @@ class UncompressedInBlock:
         sorted_uncomp_in_blocks_tuples = \
             sorted(uncomp_in_blocks_tuples, key=lambda x: x[0])
 
+        # print "sorted_uncomp_in_blocks_tuples: {}".format(sorted_uncomp_in_blocks_tuples)
         self._src_ids, self._dst_encoded_incides, self._ratings = \
             zip(*sorted_uncomp_in_blocks_tuples)
 
@@ -150,6 +152,7 @@ class UncompressedInBlock:
 
         dst_counts.append(curr_count)
 
+        print "unique_src_ids: {}, dst_counts: {}".format(unique_src_ids, dst_counts)
         num_unique = len(unique_src_ids)
         dst_ptrs = np.zeros(num_unique + 1)
         sum_count = 0
@@ -163,7 +166,6 @@ class UncompressedInBlock:
                        dst_ptrs,
                        self._dst_encoded_incides,
                        self._ratings)
-
 
 
 class UncompressedInBlockBuilder:
@@ -398,6 +400,7 @@ class NewALS:
                              item_part,
                              intermediate_rdd_storage_level)
 
+        print user_out_blocks.collect()
         user_out_blocks.count()
 
         swapped_block_ratings = \
@@ -543,7 +546,7 @@ class NewALS:
             builder = RatingBlockBuilder()
             for blk in block:
                 print type(blk)
-                exit(1)
+                # exit(1)
                 builder.merge(blk)
             # block.foreach(builder.merge)
 
@@ -579,14 +582,18 @@ class NewALS:
             :param rating_block: ((src_block_id, dst_block_id), RatingBlock(src_ids, dst_ids, ratings))
             :return: (in_block, out_block)
             """
-            assert isinstance(rating_block, ((list(), list()), RatingBlock))
+            # assert isinstance(rating_block, ((list, list), RatingBlock))
 
             block = rating_block[1]
 
             dst_id_set = set()
             dst_id_to_local_index = dict()
 
-            block.dst_ids.foreach(dst_id_set.add)
+            for dst_id in block.dst_ids:
+                dst_id_set.add(dst_id)
+
+            print "dst_id_set: {}".format(dst_id_set)
+
             sorted_dst_ids = sorted(list(dst_id_set))
 
             # i is the dst_id position in this block
@@ -601,7 +608,7 @@ class NewALS:
                                         list(dst_local_indices),
                                         block.ratings))
 
-        def build_in_block(iterator):
+        def build_in_block(iterator, dst_part):
             """
 
             :param iterator:    iterator of rating blocks which have been grouped by abd hashed
@@ -624,7 +631,7 @@ class NewALS:
 
             return builder.build().compress()
 
-        def trans_out_block(in_block):
+        def build_out_block(in_block, dst_part):
             """
 
             :param in_block: InBlock(srcIds, dstPtrs, dstEncodedIndices, _)
@@ -634,7 +641,7 @@ class NewALS:
             encoder = LocalIndexEncoder(dst_part.num_partitions)
             # list of arrays
             active_ids = [np.zeros(0)] * dst_part.num_partitions
-            seen = np.array(dst_part.num_partitions)
+            seen = np.empty(dst_part.num_partitions, dtype=bool)
 
             for i in range(in_block.size):
 
@@ -660,12 +667,15 @@ class NewALS:
             rating_blocks.map(map_rating_blocks)\
                          .groupByKey(numPartitions=src_part.num_partitions,
                                      partitionFunc=src_part.get_partition)\
-                         .mapValues(build_in_block)\
+                         .mapValues(lambda value: build_in_block(value, dst_part))\
                          .persist(storage_level)
+
+        print "in_blocks: {}".format(in_blocks)
+        exit(1)
 
         # in ALS.scala the array is used
         out_blocks = \
-            in_blocks.mapValues(trans_out_block)\
+            in_blocks.mapValues(lambda value: build_out_block(value, dst_part))\
                      .persist(storage_level)
 
         return in_blocks, out_blocks
@@ -716,8 +726,8 @@ class NewALS:
             src_factors = joined_src_out[1][1]
             assert isinstance(src_out_block, RDD)
 
-            return src_out_block.zipWithIndex()\
-                                .map(lambda (active_incides, dst_block_id):
+            yield src_out_block.zipWithIndex()\
+                               .map(lambda (active_incides, dst_block_id):
                                     (dst_block_id, (src_block_id, active_incides.map(lambda idx: src_factors[idx]))))
 
         def compute_dst_factors(in_block_with_factors,
