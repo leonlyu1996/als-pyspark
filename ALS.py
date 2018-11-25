@@ -28,7 +28,7 @@ class Rating(namedtuple("Rating", ["user", "item", "rating"])):
     Represents a (user, product, rating) tuple.
 
     >>> r = Rating(1, 2, 5.0)
-    >>> (r.user, r.product, r.rating)
+    >>> (r.user, r.item, r.rating)
     (1, 2, 5.0)
     >>> (r[0], r[1], r[2])
     (1, 2, 5.0)
@@ -40,15 +40,19 @@ class Rating(namedtuple("Rating", ["user", "item", "rating"])):
         return Rating, (int(self.user), int(self.item), float(self.rating))
 
 
-class RatingBlock:
-    def __init__(self, src_ids, dst_ids, ratings):
-        assert isinstance(src_ids, list), "src_ids should be a list!"
-        assert len(dst_ids) == len(src_ids)
-        assert len(ratings) == len(src_ids)
+class RatingBlock(namedtuple("RatingBlock", ["src_ids", "dst_ids", "ratings"])):
 
-        self.src_ids = src_ids
-        self.dst_ids = dst_ids
-        self.ratings = ratings
+    # def __init__(self, src_ids, dst_ids, ratings):
+    #     assert isinstance(src_ids, list), "src_ids should be a list!"
+    #     assert len(dst_ids) == len(src_ids)
+    #     assert len(ratings) == len(src_ids)
+    #
+    #     self.src_ids = src_ids
+    #     self.dst_ids = dst_ids
+    #     self.ratings = ratings
+
+    def __reduce__(self):
+        return RatingBlock, (self.src_ids, self.dst_ids, self.ratings)
 
     def size(self):
         return len(self.src_ids)
@@ -66,9 +70,9 @@ class RatingBlockBuilder:
             "input of add should be an instance of Rating!"
 
         self.size += 1
-        self.__src_ids += r.user
-        self.__dst_ids += r.item
-        self.__ratings += r.rating
+        self.__src_ids += [r.user]
+        self.__dst_ids += [r.item]
+        self.__ratings += [r.rating]
 
     def merge(self, other):
         assert isinstance(other, RatingBlock), \
@@ -149,7 +153,8 @@ class UncompressedInBlock:
         num_unique = len(unique_src_ids)
         dst_ptrs = np.zeros(num_unique + 1)
         sum_count = 0
-        for i in range(num_unique):
+        i = 0
+        while i < num_unique:
             sum_count += unique_src_ids[i]
             i += 1
             dst_ptrs[i] = sum_count
@@ -521,9 +526,9 @@ class NewALS:
                 # different user and product id can be hashed to same builder
                 builder.add(r)
 
-                # if builder size > 2048, build the full builder and insert a new builder
-                if builder.size > 2048:
-                    rating_bolck_builders += (idx, RatingBlockBuilder())
+                # if builder size >= 2048, build the full builder and insert a new builder
+                if builder.size >= 2048:
+                    rating_bolck_builders[idx] = RatingBlockBuilder()
                     yield ((src_block_id, dst_block_id), builder.build())
 
             for idx, builder in enumerate(rating_bolck_builders):
@@ -536,7 +541,11 @@ class NewALS:
         def aggregate(block):
 
             builder = RatingBlockBuilder()
-            block.foreach(builder.merge)
+            for blk in block:
+                print type(blk)
+                exit(1)
+                builder.merge(blk)
+            # block.foreach(builder.merge)
 
             # yield or return? yield -> get a generator
             return builder.build()
@@ -643,9 +652,14 @@ class NewALS:
 
             return active_ids
 
+        # HashPartitioner(src_part.num_partitions).get_partition
+
+        # For groupByKey, in ALS.scala it new a partitioner use src_part.num_partitions
+        # in fact we can use src_part directly
         in_blocks = \
             rating_blocks.map(map_rating_blocks)\
-                         .groupByKey(HashPartitioner(src_part.num_partitions))\
+                         .groupByKey(numPartitions=src_part.num_partitions,
+                                     partitionFunc=src_part.get_partition)\
                          .mapValues(build_in_block)\
                          .persist(storage_level)
 
