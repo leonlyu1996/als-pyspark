@@ -4,7 +4,9 @@ from scipy.optimize import nnls
 from scipy.linalg.blas import dspr, daxpy
 from scipy.linalg import cholesky
 from numpy.linalg.linalg import LinAlgError
-from numpy.linalg import inv
+from scipy.linalg import cho_factor, cho_solve
+from numpy.linalg import pinv
+import copy
 
 
 # class NormalEqationBase(namedtuple("NormalEquation", ["tri_k", "ata", "atb", "da", "k"])):
@@ -31,13 +33,17 @@ class NormalEquation(object):
         assert a.shape[0] == self.k
         self.copy(a)
 
-        # print "----------\nata {}".format(self.ata)
-        # print "da-------da {}".format(self.da)
+        print "before dspr----------\nata {}".format(self.ata)
+        print "da-------da {}".format(self.da)
+
         # use ata as return?
-        self.ata = dspr(self.k, c, self.da, self.ata, lower=1)
-        # print "==========\nata {}".format(self.ata)
+        self.ata = dspr(n=self.k, alpha=c, x=self.da, incx=1, ap=self.ata, lower=1)
+
+        print "after dspr ==========\nata {}".format(self.ata)
         if b != 0:
-            self.atb = daxpy(self.da, self.atb, n=self.k, a=b)
+            print "before daxpy ---------\natb {}".format(self.atb)
+            self.atb = daxpy(x=self.da, y=self.atb, n=self.k, a=b, incx=1, incy=1)
+            print "after daxpy ==========\n atb {}".format(self.atb)
 
         return self
 
@@ -45,10 +51,10 @@ class NormalEquation(object):
 
         assert other.k == self.k
         self.ata = \
-            daxpy(other.ata, self.ata, n=self.ata.shape[0], a=1.0)
+            daxpy(other.ata, self.ata, n=self.ata.shape[0], a=1.0, incx=1, incy=1)
 
         self.atb =\
-            daxpy(other.atb, self.atb, n=self.atb.shape[0], a=1.0)
+            daxpy(other.atb, self.atb, n=self.atb.shape[0], a=1.0, incx=1, incy=1)
 
         return self
 
@@ -99,7 +105,7 @@ class NNLSSolver(LeastSquaresNESolver):
         pos = 0
         for i in range(self.__rank):
 
-            for j in range(i + 1):
+            for j in range(i, self.__rank):
 
                 a = tri_ata[pos]
                 self.__ata[i, j] = a
@@ -120,22 +126,30 @@ class CholeskySolver(LeastSquaresNESolver):
     def solve(self, ne, lamd):
         k = ne.k
         j = 2
-        for i in range(ne.tri_k):
-            ne.ata[i] += lamd
-            i += j
-            j += 1
+        # for i in range(ne.tri_k):
+        #     ne.ata[i] += lamd
+        #     i += j
+        #     j += 1
 
         self.fill_ata(ne.ata, lamd, k)
         try:
+
+            print "before inv {}".format(self.__ata)
+            # inverse_ata = inv(self.__ata)
             # inverse_ata = cholesky(self.__ata)
-            # print "before inv {}".format(self.__ata)
-            inverse_ata = inv(self.__ata)
-            # print "after inv {}".format(self.__ata)
+            c_factor, lower = cho_factor(self.__ata, lower=False)
+            x = cho_solve((c_factor, lower), ne.atb)
+
+            print "Use cholesky"
+            print "after inv {}".format(self.__ata)
         except LinAlgError:
             print "2-th leading minor of the array may be not positive definite"
-            exit(1)
+            # inverse_ata = pinv(self.__ata)
+            # x = np.dot(inverse_ata, ne.atb)
+            x = copy.copy(ne.atb)
+            # exit(1)
 
-        x = np.dot(inverse_ata, ne.atb.T)
+        print ">>>>>>>>>>X<<<<<<<<<< {}".format(x)
         ne.reset()
         return x
 
@@ -144,10 +158,12 @@ class CholeskySolver(LeastSquaresNESolver):
         self.__ata = np.zeros(shape=(rank, rank))
         for i in range(rank):
 
-            for j in range(i + 1):
+            for j in range(i, rank):
                 a = tri_ata[pos]
                 self.__ata[i, j] = a
                 self.__ata[j, i] = a
                 pos += 1
 
             self.__ata[i, i] += lamd
+
+        print "tri_data {}\n lambda {}".format(tri_ata, lamd)

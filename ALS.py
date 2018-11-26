@@ -8,6 +8,7 @@ from collections import namedtuple
 from pyspark.mllib.common import callMLlibFunc
 from pyspark.storagelevel import StorageLevel
 from pyspark import SparkContext, SparkConf
+from scipy.linalg.blas import snrm2, sscal
 from util.partitioner import HashPartitioner, Partitioner
 from util.encoder import LocalIndexEncoder
 from py4j.java_gateway import java_import
@@ -26,7 +27,7 @@ class NewALS:
               num_user_blocks=10,
               num_item_blocks=10,
               max_iter=10,
-              reg_param=0.1,
+              reg_param=0.01,
               implicit_prefs=False,
               alpha=1.0,
               nonnegative=False,
@@ -91,10 +92,11 @@ class NewALS:
 
         seed = round(time.time())
         user_factors = self.initialize(user_in_blocks, rank, seed)
-        item_factors = self.initialize(item_in_blocks, rank, seed + 1)
+        item_factors = self.initialize(item_in_blocks, rank, seed * 2)
 
         print "init_user_factors {}".format(user_factors.glom().collect())
         print "init_item_factors {}".format(item_factors.glom().collect())
+
         # exit(0)
         # check point file?
 
@@ -395,8 +397,13 @@ class NewALS:
             """
             # list of arrays
             np.random.seed(src_in_block[0] + int(seed))
-            factors = \
-                [np.random.uniform(0, 1, rank) for _ in range(len(src_in_block[1].src_ids))]
+            factors = list()
+            for _ in range(len(src_in_block[1].src_ids)):
+                random = np.random.uniform(0, 1, rank)
+                sum_square_random = sum(np.power(random, 2))
+                factors.append(random * 1.0 / sum_square_random)
+            # factors = \
+            #     [np.random.uniform(0, 1, rank) for _ in range(len(src_in_block[1].src_ids))]
 
             return src_in_block[0], factors
 
@@ -476,7 +483,7 @@ class NewALS:
 
             # print "sorted_src_factors {}".format(sorted_src_factors)
 
-            dst_factors = [np.zeros(0) for _ in range(in_block.size)]
+            dst_factors = [np.zeros(0) for _ in range(len(in_block.src_ids))]
             # ["tri_k", "ata", "atb", "da", "k"]
             #     self.tri_k = k * (k + 1) / 2
             #     self.ata = np.zeros(self.tri_k)
@@ -505,12 +512,14 @@ class NewALS:
                         c1 = alpha * np.abs(rating)
 
                         num_explicits += 1 if rating > 0.0 else 0
-                        ls.add(src_factor, 1.0 + c1 if rating > 0.0 else 0.0, c1)
+                        ls.add(src_factor, (1.0 + c1) if rating > 0.0 else 0.0, c1)
 
                     else:
                         ls.add(src_factor, rating)
                         num_explicits += 1
 
+                print "ls ata {}".format(ls.ata)
+                print "ls atb {}".format(ls.atb)
                 dst_factors[j] = solver.solve(ls, num_explicits * reg_param)
 
             return dst_factors
@@ -534,13 +543,14 @@ class NewALS:
         merged = src_out.groupByKey(numPartitions=partitioner.num_partitions,
                                     partitionFunc=partitioner.get_partition)
 
-        print "groupbykey {}".format(merged.collect())
+        # print "groupbykey {}".format(merged.collect())
         dst_factors =  \
             dst_in_blocks.join(merged)
-        print "intermmediate dst_in_blocks {}".format(dst_factors.glom().collect())
+        # print "intermmediate dst_in_blocks {}".format(dst_factors.glom().collect())
         dst_factors = dst_factors.mapValues(lambda in_block_with_factors:
                                     compute_dst_factors(in_block_with_factors, num_src_blocks, src_encoder, solver))
 
+        print "dst_factors: {}".format(dst_factors.collect())
         # print "dst_factors {}".format(dst_factors.collect())
         # dst_factors =  \
         #     dst_in_blocks.join(merged)\
@@ -572,22 +582,22 @@ class NewALS:
 if __name__ == "__main__":
 
     import os
-    os.environ["PYSPARK_PYTHON"] = "/Users/leon/anaconda3/envs/py27/bin/python"
+    os.environ["PYSPARK_PYTHON"] = "/Users/az/Downloads/applications/anaconda2/bin/python"
     conf = SparkConf().set("spark.jars",
                            "/Users/az/Downloads/HKUST/Big_Data_Computing_5003/project/als/ALS/netlib-java-1.1.jar")
 
     sc = SparkContext(conf=conf)
 
-    data = sc.textFile("../data/test.data", 2)
+    data = sc.textFile("../ALS/data/test.data", 2)
     ratings = data.map(lambda l: l.split(',')) \
         .map(lambda l: Rating(int(l[0]), int(l[1]), float(l[2])))
 
     # print ratings.isEmpty()
-    print ratings.glom().collect()
+    print ratings.collect()
 
     # Build the recommendation model using Alternating Least Squares
     rank = 10
-    numIterations = 10
+    numIterations = 4
 
     als = NewALS()
 
@@ -607,16 +617,6 @@ if __name__ == "__main__":
     print "user_id_and_factor: {}".format(user_id_and_factors.collect())
     print "item_id_and_factor {}".format(item_id_and_factors.collect())
 
-
-# test.map(x => (x.user, (x.product, x.rating))).join(userFactors).map { case (userId, ((prodId, rating), userFactor)) =>
-#       (prodId, (rating, userFactor))
-#     }.join(prodFactors).values.map { case ((rating, userFactor), prodFactor) =>
-#       (blas.sdot(k, userFactor, 1, prodFactor, 1), rating)
-#     }
-# mse = predictionAndRatings.map { case (pred, rating) =>
-#       val err = pred - rating
-#       err * err
-#     }.mean()
     predictionAndRatings = ratings.map(lambda user_prod_pair: (user_prod_pair[0], (user_prod_pair[1], user_prod_pair[2])))\
                                   .join(user_id_and_factors)\
                                   .map(lambda joined: (joined[1][0][0], (joined[1][0][1], joined[1][1]))).join(item_id_and_factors)\
