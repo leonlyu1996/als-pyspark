@@ -4,18 +4,23 @@ import numpy as np
 from collections import namedtuple
 from pyspark.mllib.common import callMLlibFunc
 from pyspark.storagelevel import StorageLevel
-from pyspark import SparkContext
+from pyspark import SparkContext, SparkConf
 from pyspark.accumulators import AccumulatorParam
 from util.partitioner import HashPartitioner, Partitioner
 from util.encoder import LocalIndexEncoder
-from scipy.linalg import blas, cholesky
+from scipy.linalg.blas import dspr, daxpy
+from scipy.linalg import cholesky
 from scipy.optimize import nnls
 from numpy.linalg.linalg import LinAlgError
+import dill as pickle
+from py4j.java_gateway import java_import
+import time
 import pdb
 
 
+conf = SparkConf().set("spark.jars",
+                       "/Users/az/Downloads/HKUST/Big_Data_Computing_5003/project/als/ALS/netlib-java-1.1.jar")
 sc = SparkContext()
-
 
 # class Rating:
 #
@@ -23,6 +28,7 @@ sc = SparkContext()
 #         self.user = user
 #         self.item = item
 #         self.rating = rating
+
 
 class Rating(namedtuple("Rating", ["user", "item", "rating"])):
     """
@@ -117,12 +123,15 @@ class InBlock(namedtuple("InBlock", ["src_ids", "dst_ptrs", "dst_encoded_incides
 
     def __reduce__(self):
         self.size = len(self.ratings)
-        print "dst_encoded_incides: {}, self.size: {}, dst_ptrs: {}".format(len(self.dst_encoded_incides), self.size, len(self.dst_ptrs))
+        print "dst_encoded_incides: {}, self.size: {}, dst_ptrs: {}"\
+            .format(len(self.dst_encoded_incides), self.size, len(self.dst_ptrs))
+
         assert len(self.dst_encoded_incides) == self.size
         assert len(self.dst_ptrs) == len(self.src_ids) + 1
         return InBlock, (self.src_ids, self.dst_ptrs, self.dst_encoded_incides, self.ratings)
 
         # (namedtuple("InBlock", ["src_ids", "dst_ptrs", "dst_encoded_incides", "ratings"]))
+
 
 class UncompressedInBlock:
 
@@ -151,14 +160,14 @@ class UncompressedInBlock:
         pre_src_id = self._src_ids[0]
         unique_src_ids.append(pre_src_id)
 
-        print "__src_ids: {}".format(self._src_ids)
+        # print "__src_ids: {}".format(self._src_ids)
         curr_count = 1
         for i in range(1, self.size):
             src_id = self._src_ids[i]
-            print "src_id: {}".format(src_id)
-            print "pre_src_id: {}".format(pre_src_id)
+            # print "src_id: {}".format(src_id)
+            # print "pre_src_id: {}".format(pre_src_id)
             if src_id != pre_src_id:
-                print "curr_count: {}".format(curr_count)
+                # print "curr_count: {}".format(curr_count)
                 unique_src_ids.append(src_id)
                 dst_counts.append(curr_count)
                 pre_src_id = src_id
@@ -172,13 +181,13 @@ class UncompressedInBlock:
         dst_ptrs = np.zeros(num_unique + 1, dtype=int)
         sum_count = 0
         i = 0
-        print "unique_src_ids {}".format(unique_src_ids)
+        #print "unique_src_ids {}".format(unique_src_ids)
         while i < num_unique:
             sum_count += dst_counts[i]
             i += 1
             dst_ptrs[i] = int(sum_count)
 
-        print "unique_src_ids: {}, dst_counts: {}, dst_ptrs: {}".format(unique_src_ids, dst_counts, dst_ptrs)
+        #print "unique_src_ids: {}, dst_counts: {}, dst_ptrs: {}".format(unique_src_ids, dst_counts, dst_ptrs)
         # pdb.set_trace()
         return InBlock(unique_src_ids,
                        dst_ptrs,
@@ -238,28 +247,41 @@ class AccumulateRatingBlockBuilder(AccumulatorParam):
         return value1
 
 
-class NormalEquation:
+class NormalEqationBase(namedtuple("NormalEquation", ["tri_k", "ata", "atb", "da", "k"])):
 
-    def __init__(self, k):
-        self.tri_k = k * (k + 1) / 2
-        self.ata = np.zeros(self.tri_k)
-        self.atb = np.zeros(k)
-        self.da = np.zeros(k)
-        self.k = k
+    def __reduce__(self):
+        return NormalEquation, (self.tri_k, self.ata, self.atb, self.da, self.k)
 
-    def copy2double(self, a):
+
+class NormalEquation(NormalEqationBase):
+
+    # def __init__(self, k):
+    #     self.tri_k = k * (k + 1) / 2
+    #     self.ata = np.zeros(self.tri_k)
+    #     self.atb = np.zeros(k)
+    #     self.da = np.zeros(k)
+    #     self.k = k
+
+    def copy(self, a):
         for i in range(self.k):
             self.da[i] = a[i]
 
     def add(self, a, b, c=1.0):
         assert c > 0
         assert a.shape[0] == self.k
-        self.copy2double(a)
+        self.copy(a)
 
+        print "----------\nata {}".format(self.ata)
         # use ata as return?
-        self.ata = blas.dspr(self.k, c, self.da, self.ata, lower=1)
+        k = self.k
+        da = self.da
+        ata = self.ata
+        atb = self.atb
+        ata = dspr(k, c, da, ata, lower=1)
+        self.ata = ata
+        print "==========\nata {}".format(self.ata)
         if b != 0:
-            self.atb = blas.daxpy(self.da, self.atb, n=self.k, a=b)
+            self.atb = daxpy(self.da, self.atb, n=self.k, a=b)
 
         return self
 
@@ -267,16 +289,19 @@ class NormalEquation:
 
         assert other.k == self.k
         self.ata = \
-            blas.daxpy(other.ata, self.ata, n=self.ata.shape[0], a=1.0)
+            daxpy(other.ata, self.ata, n=self.ata.shape[0], a=1.0)
 
         self.atb =\
-            blas.daxpy(other.atb, self.atb, n=self.atb.shape[0], a=1.0)
+            daxpy(other.atb, self.atb, n=self.atb.shape[0], a=1.0)
 
         return self
 
     def reset(self):
         self.ata.fill(0.0)
         self.atb.fill(0.0)
+
+    def __reduce__(self):
+        return NormalEquation, (self.tri_k, self.ata, self.atb, self.da, self.k)
 
 
 class LeastSquaresNESolver:
@@ -413,7 +438,7 @@ class NewALS:
         block_ratings = self.partition_ratings(ratings, user_part, item_part)\
                             .persist(intermediate_rdd_storage_level)
 
-        print "block_rating: {}".format(block_ratings.glom().collect())
+        # print "block_rating: {}".format(block_ratings.glom().collect())
         (user_in_blocks, user_out_blocks) = \
             self.make_blocks(block_ratings,
                              user_part,
@@ -443,6 +468,8 @@ class NewALS:
         user_factors = self.initialize(user_in_blocks, rank)
         item_factors = self.initialize(item_in_blocks, rank)
 
+        print "init_user_factors {}".format(user_factors.glom().collect())
+        print "init_item_factors {}".format(item_factors.glom().collect())
         # check point file?
 
         solver = NNLSSolver if nonnegative else CholeskySolver
@@ -633,9 +660,9 @@ class NewALS:
                 map(lambda id: dst_id_to_local_index[id], block.dst_ids)
 
             return (rating_block[0][0], (rating_block[0][1],
-                                        block.src_ids,
-                                        list(dst_local_indices),
-                                        block.ratings))
+                                         block.src_ids,
+                                         list(dst_local_indices),
+                                         block.ratings))
 
         def build_in_block(iterator, dst_part):
             """
@@ -653,7 +680,7 @@ class NewALS:
             # rating block in each in_block
             for rating_block in iterator:
 
-                print rating_block
+                #print rating_block
 
                 builder.add(rating_block[0],
                             rating_block[1],
@@ -674,7 +701,7 @@ class NewALS:
             active_ids = [np.zeros(0, dtype=int) for _ in range(dst_part.num_partitions)]
             seen = np.empty(dst_part.num_partitions, dtype=bool)
 
-            print "in_block.src_ids {}".format(in_block.src_ids)
+            # print "in_block.src_ids {}".format(in_block.src_ids)
 
             for i in range(len(in_block.src_ids)):
 
@@ -684,7 +711,7 @@ class NewALS:
                     block_id = \
                         encoder.get_block_id(in_block.dst_encoded_incides[j])
 
-                    print "block_id {}".format(block_id)
+                    # print "block_id {}".format(block_id)
                     if not seen[block_id]:
 
                         active_ids[block_id] = \
@@ -705,14 +732,14 @@ class NewALS:
                          .mapValues(lambda value: build_in_block(value, dst_part))\
                          .persist(storage_level)
 
-        print "in_blocks: {}".format(in_blocks.collect())
+        # print "in_blocks: {}".format(in_blocks.collect())
 
         # in ALS.scala the array is used
         out_blocks = \
             in_blocks.mapValues(lambda value: build_out_block(value, dst_part))\
                      .persist(storage_level)
 
-        print "out_blocks: {}".format(out_blocks.collect())
+        # print "out_blocks: {}".format(out_blocks.collect())
 
         return in_blocks, out_blocks
 
@@ -730,6 +757,7 @@ class NewALS:
             :return:
             """
             # list of arrays
+            # np.random.seed(time.time())
             factors = \
                 [np.random.uniform(0, 1, rank) for _ in range(len(src_in_block[1].src_ids))]
 
@@ -762,12 +790,26 @@ class NewALS:
             src_out_block = joined_src_out[1][0]
             src_block_id = joined_src_out[0]
             src_factors = joined_src_out[1][1]
-            # assert isinstance(src_out_block, RDD)
 
-            yield joined_src_out.map(lambda x: x[1][0])\
-                                .zipWithIndex()\
-                                .map(lambda (active_incides, dst_block_id):
-                                    (dst_block_id, (src_block_id, active_incides.map(lambda idx: src_factors[idx]))))
+            # print "src_out_block {}, src_block_id {}, src_factors {}"\
+            #     .format(src_out_block, src_block_id, src_factors)
+
+            # assert isinstance(src_out_block, RDD)
+            dst_block_ids = [i for i in range(len(src_out_block))]
+            src_out_block = zip(src_out_block, dst_block_ids)
+
+            results = map(lambda zip_block_and_id:
+                          (zip_block_and_id[1], (src_block_id, list(map(lambda idx:
+                                                                       src_factors[idx], zip_block_and_id[0])))), src_out_block)
+
+            print "result: {}".format(list(results))
+
+            for result in list(results):
+                yield result
+            # yield joined_src_out.map(lambda x: x[1][0])\
+            #                     .zipWithIndex()\
+            #                     .map(lambda (active_incides, dst_block_id):
+            #                          (dst_block_id, (src_block_id, active_incides.map(lambda idx: src_factors[idx]))))
 
         def compute_dst_factors(in_block_with_factors,
                                 num_src_blocks,
@@ -778,16 +820,29 @@ class NewALS:
             :param in_block_with_factors: (InBlock(dstIds, srcPtrs, srcEncodedIndices, ratings), srcFactors)
             :return:
             """
+
             in_block = in_block_with_factors[0]
             src_factors = in_block_with_factors[1]
 
-            sorted_src_factors = np.zeros(num_src_blocks)
+            sorted_src_factors = [list() for _ in range(num_src_blocks)]
+            print "src_factors {}".format([i for i in src_factors])
+            for factor in src_factors:
+                sorted_src_factors[factor[0]] = factor[1]
 
-            src_factors.foreach(lambda (src_block_id, factors):
-                                np.put(sorted_src_factors, [src_block_id], [factors]))
+            print "sorted_src_factors {}".format(sorted_src_factors)
 
             dst_factors = [np.zeros(0) for _ in range(in_block.size)]
-            ls = NormalEquation(rank)
+            # ["tri_k", "ata", "atb", "da", "k"]
+            #     self.tri_k = k * (k + 1) / 2
+            #     self.ata = np.zeros(self.tri_k)
+            #     self.atb = np.zeros(k)
+            #     self.da = np.zeros(k)
+            #     self.k = k
+            tri_k = rank * (rank + 1) / 2
+            ata = np.zeros(tri_k)
+            atb = np.zeros(rank)
+            da = np.zeros(rank)
+            ls = NormalEquation(tri_k, ata, atb, da, rank)
             for j in range(in_block.size):
                 ls.reset()
 
@@ -799,7 +854,7 @@ class NewALS:
 
                     encoded = in_block.dst_encoded_incides[i]
 
-                    block_id = src_encoder.blockId(encoded)
+                    block_id = src_encoder.get_block_id(encoded)
                     local_index = src_encoder.get_local_index(encoded)
                     src_factor = sorted_src_factors[block_id][local_index]
 
@@ -825,7 +880,7 @@ class NewALS:
         y_t_y = \
             self.compute_y_t_y(src_factor_blocks, rank) if implicit_prefs else None
 
-        src_out = src_out_blocks.join(src_factor_blocks)
+        src_out = src_out_blocks.join(src_factor_blocks).flatMap(trans_src_out_blocks)
 
         print "src_out: {}".format(src_out.collect())
 
@@ -843,6 +898,12 @@ class NewALS:
             dst_in_blocks.join(merged)\
                          .mapValues(lambda in_block_with_factors:
                                     compute_dst_factors(in_block_with_factors, num_src_blocks, src_encoder, solver))
+
+        print "dst_factors {}".format(dst_factors.collect())
+        # dst_factors =  \
+        #     dst_in_blocks.join(merged)\
+        #                  .mapValues(lambda in_block_with_factors:
+        #                             compute_dst_factors(in_block_with_factors, num_src_blocks, src_encoder, solver))
 
         return dst_factors
 
