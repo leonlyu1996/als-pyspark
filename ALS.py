@@ -94,8 +94,8 @@ class NewALS:
         user_factors = self.initialize(user_in_blocks, rank, seed)
         item_factors = self.initialize(item_in_blocks, rank, seed * 2)
 
-        print "init_user_factors {}".format(user_factors.glom().collect())
-        print "init_item_factors {}".format(item_factors.glom().collect())
+        #print "init_user_factors {}".format(user_factors.glom().collect())
+        #print "init_item_factors {}".format(item_factors.glom().collect())
 
         # exit(0)
         # check point file?
@@ -106,7 +106,7 @@ class NewALS:
             for iter in range(1, max_iter + 1):
 
                 user_factors.persist(intermediate_rdd_storage_level)
-                print "user_factors {}".format(user_factors)
+                #print "user_factors {}".format(user_factors)
                 previous_item_factors = item_factors
                 item_factors = self.compute_factors(src_factor_blocks=user_factors,
                                                     src_out_blocks=user_out_blocks,
@@ -137,7 +137,7 @@ class NewALS:
         else:
 
             for iter in range(0, max_iter):
-                print "user_factors {}".format(user_factors.collect())
+                #print "user_factors {}".format(user_factors.collect())
 
                 item_factors = self.compute_factors(src_factor_blocks=user_factors,
                                                     src_out_blocks=user_out_blocks,
@@ -162,7 +162,7 @@ class NewALS:
                                          preservesPartitioning=True)\
                           .persist(final_rdd_storage_level)
 
-        print "user_id_and_factors {}".format(user_id_and_factors.glom().collect())
+        #print "user_id_and_factors {}".format(user_id_and_factors.glom().collect())
         # user_id_and_factors = \
         #     user_in_blocks.mapValues(lambda in_block: in_block.src_ids)\
         #                   .join(user_factors)\
@@ -448,13 +448,13 @@ class NewALS:
 
             # assert isinstance(src_out_block, RDD)
             dst_block_ids = [i for i in range(len(src_out_block))]
-            print "src_out_block {}".format(src_out_block)
+            #print "src_out_block {}".format(src_out_block)
             src_out_block = zip(src_out_block, dst_block_ids)
-            print "zipped_block_and_id {}".format(src_out_block)
+            #print "zipped_block_and_id {}".format(src_out_block)
             results = map(lambda zip_block_and_id:
                           (zip_block_and_id[1], (src_block_id, list(map(lambda idx: src_factors[idx], zip_block_and_id[0])))), src_out_block)
 
-            print "result: {}".format(list(results))
+            #print "result: {}".format(list(results))
 
             for result in list(results):
                 yield result
@@ -518,8 +518,8 @@ class NewALS:
                         ls.add(src_factor, rating)
                         num_explicits += 1
 
-                print "ls ata {}".format(ls.ata)
-                print "ls atb {}".format(ls.atb)
+                #print "ls ata {}".format(ls.ata)
+                #print "ls atb {}".format(ls.atb)
                 dst_factors[j] = solver.solve(ls, num_explicits * reg_param)
 
             return dst_factors
@@ -530,12 +530,12 @@ class NewALS:
         y_t_y = \
             self.compute_y_t_y(src_factor_blocks, rank) if implicit_prefs else None
 
-        print "src_out_blocks {}".format(src_out_blocks.collect())
+        #print "src_out_blocks {}".format(src_out_blocks.collect())
 
         src_out = src_out_blocks.join(src_factor_blocks)\
                                 .flatMap(trans_src_out_blocks)
 
-        print "src_out {}".format(src_out.collect())
+        #print "src_out {}".format(src_out.collect())
         assert isinstance(src_out, RDD)
 
         partitioner = HashPartitioner(dst_in_blocks.getNumPartitions())
@@ -550,7 +550,7 @@ class NewALS:
         dst_factors = dst_factors.mapValues(lambda in_block_with_factors:
                                     compute_dst_factors(in_block_with_factors, num_src_blocks, src_encoder, solver))
 
-        print "dst_factors: {}".format(dst_factors.collect())
+        #print "dst_factors: {}".format(dst_factors.collect())
         # print "dst_factors {}".format(dst_factors.collect())
         # dst_factors =  \
         #     dst_in_blocks.join(merged)\
@@ -578,7 +578,6 @@ class NewALS:
                                        (lambda (ne1, ne2): inter_add(ne1, ne2)))
 
 
-
 if __name__ == "__main__":
 
     import os
@@ -593,19 +592,20 @@ if __name__ == "__main__":
         .map(lambda l: Rating(int(l[0]), int(l[1]), float(l[2])))
 
     # print ratings.isEmpty()
-    print ratings.collect()
+    #print ratings.collect()
 
     # Build the recommendation model using Alternating Least Squares
     rank = 10
-    numIterations = 4
+    numIterations = 5
 
     als = NewALS()
 
     num_user_blocks = max(ratings.getNumPartitions(), ratings.getNumPartitions() / 2)
-    print num_user_blocks
+    #print num_user_blocks
 
     num_item_blocks = max(ratings.getNumPartitions(), ratings.getNumPartitions() / 2)
 
+    sTime = time.time()
     (user_id_and_factors, item_id_and_factors) = als.train(ratings=ratings,
                                                            rank=rank,
                                                            num_user_blocks=num_user_blocks,
@@ -613,21 +613,22 @@ if __name__ == "__main__":
                                                            max_iter=numIterations,
                                                            reg_param=0.01,
                                                            nonnegative=False)
+    print "traing time {}".format(time.time() - sTime)
 
-    print "user_id_and_factor: {}".format(user_id_and_factors.collect())
-    print "item_id_and_factor {}".format(item_id_and_factors.collect())
+    #print "user_id_and_factor: {}".format(user_id_and_factors.collect())
+    #print "item_id_and_factor {}".format(item_id_and_factors.collect())
 
+    sTime = time.time()
     predictionAndRatings = ratings.map(lambda user_prod_pair: (user_prod_pair[0], (user_prod_pair[1], user_prod_pair[2])))\
                                   .join(user_id_and_factors)\
                                   .map(lambda joined: (joined[1][0][0], (joined[1][0][1], joined[1][1]))).join(item_id_and_factors)\
                                   .mapValues(lambda value: (np.dot(value[0][1], value[1]), value[0][0]))
-    # predictionAndRatings = data.map(lambda user_prod_pair: (user_prod_pair[0], (user_prod_pair[1], user_prod_pair[2])))\
-    #                            .join(user_id_and_factors)\
-    #                            .map(lambda joined: (joined[1][0], (joined[1][1], joined[2]))).join(item_id_and_factors)\
-    #                            .mapValues(lambda value: (np.dot(value[0][1], value[1]), value[0][0]))
+
+
     print "predict_and_rating {}".format(predictionAndRatings.collect())
     mse = predictionAndRatings.map(lambda pred_and_rating: np.power(pred_and_rating[1][0] - pred_and_rating[1][1], 2)).mean()
     print "mse {}".format(mse)
+    print "Time {}".format(time.time() - sTime)
 
 
 

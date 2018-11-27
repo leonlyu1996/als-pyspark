@@ -33,17 +33,17 @@ class NormalEquation(object):
         assert a.shape[0] == self.k
         self.copy(a)
 
-        print "before dspr----------\nata {}".format(self.ata)
-        print "da-------da {}".format(self.da)
+        # print "before dspr----------\nata {}".format(self.ata)
+        # print "da-------da {}".format(self.da)
 
         # use ata as return?
         self.ata = dspr(n=self.k, alpha=c, x=self.da, incx=1, ap=self.ata, lower=1)
 
-        print "after dspr ==========\nata {}".format(self.ata)
+        # print "after dspr ==========\nata {}".format(self.ata)
         if b != 0:
-            print "before daxpy ---------\natb {}".format(self.atb)
+            # print "before daxpy ---------\natb {}".format(self.atb)
             self.atb = daxpy(x=self.da, y=self.atb, n=self.k, a=b, incx=1, incy=1)
-            print "after daxpy ==========\n atb {}".format(self.atb)
+            # print "after daxpy ==========\n atb {}".format(self.atb)
 
         return self
 
@@ -125,7 +125,7 @@ class CholeskySolver(LeastSquaresNESolver):
 
     def solve(self, ne, lamd):
         k = ne.k
-        j = 2
+        # j = 2
         # for i in range(ne.tri_k):
         #     ne.ata[i] += lamd
         #     i += j
@@ -134,22 +134,21 @@ class CholeskySolver(LeastSquaresNESolver):
         self.fill_ata(ne.ata, lamd, k)
         try:
 
-            print "before inv {}".format(self.__ata)
+            # print "before inv {}".format(self.__ata)
             # inverse_ata = inv(self.__ata)
             # inverse_ata = cholesky(self.__ata)
             c_factor, lower = cho_factor(self.__ata, lower=False)
             x = cho_solve((c_factor, lower), ne.atb)
 
-            print "Use cholesky"
-            print "after inv {}".format(self.__ata)
+            # print "Use cholesky"
+            # print "after inv {}".format(self.__ata)
         except LinAlgError:
-            print "2-th leading minor of the array may be not positive definite"
+            # print "2-th leading minor of the array may be not positive definite"
             # inverse_ata = pinv(self.__ata)
             # x = np.dot(inverse_ata, ne.atb)
             x = copy.copy(ne.atb)
-            # exit(1)
 
-        print ">>>>>>>>>>X<<<<<<<<<< {}".format(x)
+        # print ">>>>>>>>>>X<<<<<<<<<< {}".format(x)
         ne.reset()
         return x
 
@@ -166,4 +165,4 @@ class CholeskySolver(LeastSquaresNESolver):
 
             self.__ata[i, i] += lamd
 
-        print "tri_data {}\n lambda {}".format(tri_ata, lamd)
+        # print "tri_data {}\n lambda {}".format(tri_ata, lamd)

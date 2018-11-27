@@ -25,7 +25,7 @@ class InBlock(object):
         self.dst_encoded_incides = dst_encoded_incides
         self.ratings = ratings
         self.size = len(ratings)
-        print "dst_encoded_incides: {}, self.size: {}, dst_ptrs: {}".format(len(dst_encoded_incides), self.size, len(dst_ptrs))
+        # print "dst_encoded_incides: {}, self.size: {}, dst_ptrs: {}".format(len(dst_encoded_incides), self.size, len(dst_ptrs))
         assert len(dst_encoded_incides) == self.size
         assert len(dst_ptrs) == len(src_ids) + 1
 

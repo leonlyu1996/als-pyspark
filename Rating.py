@@ -62,8 +62,8 @@ class RatingBlockBuilder:
         self.__ratings += other.ratings
 
     def build(self):
-        print "builder.build src_ids {}, dst_ids {}, ratings {}"\
-            .format(self.__src_ids, self.__dst_ids, self.__ratings)
+        # print "builder.build src_ids {}, dst_ids {}, ratings {}"\
+        #     .format(self.__src_ids, self.__dst_ids, self.__ratings)
         return RatingBlock(self.__src_ids,
                            self.__dst_ids,
                            self.__ratings)
